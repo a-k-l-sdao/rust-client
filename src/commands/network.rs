@@ -177,7 +177,7 @@ pub async fn full_deploy_command(args: &DeployArgs) -> Result<(), Box<dyn std::e
     let f1r3fly_api = F1r3flyApi::new(&args.private_key, &args.host, args.port);
 
     let phlo_limit = if args.bigger_phlo {
-        "5,000,000,000"
+        "50,000,000,000"
     } else {
         "50,000"
     };
@@ -202,17 +202,39 @@ pub async fn full_deploy_command(args: &DeployArgs) -> Result<(), Box<dyn std::e
         )
         .await
     {
-        Ok(ProposeResult::Proposed(block_hash)) => {
+        Ok((block_hash, deploy_id, data)) => {
             let duration = start_time.elapsed();
-            println!("Deployment and block proposal successful!");
-            println!("Time taken: {:.2?}", duration);
-            println!("Block hash: {}", block_hash);
-        }
-        Ok(ProposeResult::Skipped(reason)) => {
-            let duration = start_time.elapsed();
-            println!("Deployment successful, but proposal was skipped.");
-            println!("Time taken: {:.2?}", duration);
-            println!("Skip reason: {}", reason);
+            println!("⏱️  Time taken: {:.2?}", duration);
+            println!("🔑 Deploy ID: {}", deploy_id);
+            println!("🧱 Block hash: {}", block_hash);
+
+            // Check deploy status via HTTP API (gRPC port + 1 is typically HTTP)
+            let http_port = args.port + 1;
+            match f1r3fly_api.get_deploy_info(&deploy_id, http_port).await {
+                Ok(info) => {
+                    if info.errored {
+                        println!("❌ Deploy execution FAILED (used all phlo = out of resources)");
+                        if let Some(err) = &info.system_deploy_error {
+                            println!("   System error: {}", err);
+                        }
+                        return Err("Deploy errored during execution".into());
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal: we just can't check error status
+                    println!("⚠️  Could not verify deploy status via HTTP API: {}", e);
+                }
+            }
+
+            println!("✅ Deployment and block proposal successful!");
+            if !data.is_empty() {
+                println!("📦 deployId channel data:");
+                for (i, item) in data.iter().enumerate() {
+                    println!("  [{}] {}", i, item);
+                }
+            } else {
+                println!("📦 deployId channel: (no data)");
+            }
         }
         Err(e) => {
             println!("Operation failed!");
