@@ -864,8 +864,9 @@ impl<'a> F1r3flyApi<'a> {
             .expect("Failed to get system time")
             .as_millis() as i64;
 
-        // Create a projection with only the fields used for signature calculation
-        // IMPORTANT: The language field is deliberately excluded from signature calculation
+        // Create a projection with the fields used for signature calculation
+        // NOTE: language IS included because the current Docker image (pre-80c9bc2a)
+        // includes it in DeployData's ToMessage serialization
         let projection = DeployDataProto {
             term: code.clone(),
             timestamp,
@@ -873,7 +874,7 @@ impl<'a> F1r3flyApi<'a> {
             phlo_limit,
             valid_after_block_number,
             shard_id: "root".into(),
-            language: String::new(), // Excluded from signature calculation
+            language: language.clone(),
             sig: ByteString::new(),
             deployer: ByteString::new(),
             sig_algorithm: String::new(),
