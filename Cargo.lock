@@ -1968,6 +1968,7 @@ dependencies = [
  "f1r3fly-rholang",
  "futures-util",
  "hex",
+ "k256",
  "prost",
  "rand 0.8.5",
  "ratatui",

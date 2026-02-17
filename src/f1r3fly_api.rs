@@ -3,16 +3,18 @@ use f1r3fly_models::casper::v1::deploy_response::Message as DeployResponseMessag
 use f1r3fly_models::casper::v1::deploy_service_client::DeployServiceClient;
 use f1r3fly_models::casper::v1::exploratory_deploy_response::Message as ExploratoryDeployResponseMessage;
 use f1r3fly_models::casper::v1::is_finalized_response::Message as IsFinalizedResponseMessage;
+use f1r3fly_models::casper::v1::rho_data_response::Message as RhoDataResponseMessage;
 use f1r3fly_models::casper::v1::propose_response::Message as ProposeResponseMessage;
 use f1r3fly_models::casper::v1::propose_service_client::ProposeServiceClient;
 use f1r3fly_models::casper::{
-    BlocksQuery, BlocksQueryByHeight, DeployDataProto, ExploratoryDeployQuery, IsFinalizedQuery,
-    LightBlockInfo, ProposeQuery,
+    BlocksQuery, BlocksQueryByHeight, DataAtNameByBlockQuery, DeployDataProto,
+    ExploratoryDeployQuery, IsFinalizedQuery, LightBlockInfo, ProposeQuery,
 };
-use f1r3fly_models::rhoapi::Par;
+use f1r3fly_models::rhoapi::g_unforgeable::UnfInstance;
+use f1r3fly_models::rhoapi::{GDeployId, GUnforgeable, Par};
 use f1r3fly_models::ByteString;
+use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature as K256Signature, SigningKey};
 use prost::Message;
-use secp256k1::{Message as Secp256k1Message, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use typenum::U32;
@@ -45,7 +47,7 @@ pub enum DeployStatus {
 
 /// Client for interacting with the F1r3fly API
 pub struct F1r3flyApi<'a> {
-    signing_key: SecretKey,
+    signing_key: SigningKey,
     node_host: &'a str,
     grpc_port: u16,
 }
@@ -63,8 +65,9 @@ impl<'a> F1r3flyApi<'a> {
     ///
     /// A new `F1r3flyApi` instance
     pub fn new(signing_key: &str, node_host: &'a str, grpc_port: u16) -> Self {
+        let key_bytes = hex::decode(signing_key).expect("Invalid hex private key");
         F1r3flyApi {
-            signing_key: SecretKey::from_slice(&hex::decode(signing_key).unwrap()).unwrap(),
+            signing_key: SigningKey::from_slice(&key_bytes).expect("Invalid private key"),
             node_host,
             grpc_port,
         }
@@ -88,7 +91,7 @@ impl<'a> F1r3flyApi<'a> {
         language: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let phlo_limit: i64 = if use_bigger_phlo_price {
-            5_000_000_000
+            50_000_000_000
         } else {
             50_000
         };
@@ -292,7 +295,70 @@ impl<'a> F1r3flyApi<'a> {
         }
     }
 
-    /// Performs a full deployment cycle: deploy and propose
+    /// Gets data sent to a deploy's `deployId` channel in a specific block.
+    ///
+    /// # Arguments
+    ///
+    /// * `deploy_id_hex` - The deploy ID (hex-encoded DER signature)
+    /// * `block_hash` - The block hash to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of string representations of the data sent to the deployId channel
+    pub async fn get_data_at_deploy_id(
+        &self,
+        deploy_id_hex: &str,
+        block_hash: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let deploy_id_bytes = hex::decode(deploy_id_hex)
+            .map_err(|e| format!("Invalid deploy ID hex: {}", e))?;
+
+        // Build a Par containing the unforgeable GDeployId name
+        let par = Par {
+            unforgeables: vec![GUnforgeable {
+                unf_instance: Some(UnfInstance::GDeployIdBody(GDeployId {
+                    sig: deploy_id_bytes.into(),
+                })),
+            }],
+            ..Default::default()
+        };
+
+        let query = DataAtNameByBlockQuery {
+            par: Some(par),
+            block_hash: block_hash.to_string(),
+            use_pre_state_hash: false,
+        };
+
+        let mut client =
+            DeployServiceClient::connect(format!("http://{}:{}/", self.node_host, self.grpc_port))
+                .await?;
+
+        let response = client.get_data_at_name(query).await?;
+
+        let message = response
+            .get_ref()
+            .message
+            .as_ref()
+            .ok_or("No response from getDataAtName")?;
+
+        match message {
+            RhoDataResponseMessage::Error(err) => {
+                Err(format!("getDataAtName error: {}", err.messages.join("; ")).into())
+            }
+            RhoDataResponseMessage::Payload(payload) => {
+                let mut results = Vec::new();
+                for par in &payload.par {
+                    match extract_par_data(par) {
+                        Some(data) => results.push(data),
+                        None => results.push(format!("{:?}", par)),
+                    }
+                }
+                Ok(results)
+            }
+        }
+    }
+
+    /// Performs a full deployment cycle: deploy, propose, and listen for deployId data
     ///
     /// # Arguments
     ///
@@ -302,19 +368,50 @@ impl<'a> F1r3flyApi<'a> {
     ///
     /// # Returns
     ///
-    /// The block hash if successful, otherwise an error
+    /// A tuple of (block_hash, deploy_id, deployId_channel_data)
     pub async fn full_deploy(
         &self,
         rho_code: &str,
         use_bigger_phlo_price: bool,
         language: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        // First deploy the code
-        self.deploy(rho_code, use_bigger_phlo_price, language)
-            .await?;
+    ) -> Result<(String, String, Vec<String>), Box<dyn std::error::Error>> {
+        // Deploy the code and get the deploy ID
+        let deploy_id = self.deploy(rho_code, use_bigger_phlo_price, language).await?;
 
-        // Then propose a block
-        self.propose().await
+        // Propose a block (retry on NotEnoughNewBlocks / another propose in progress)
+        let mut block_hash = String::new();
+        for attempt in 1..=6 {
+            match self.propose().await {
+                Ok(hash) => {
+                    block_hash = hash;
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if (msg.contains("NotEnoughNewBlocks") || msg.contains("another propose"))
+                        && attempt < 6
+                    {
+                        println!(
+                            "⏳ Propose attempt {}/6 failed ({}), retrying in 10s...",
+                            attempt,
+                            if msg.contains("NotEnoughNewBlocks") {
+                                "waiting for new blocks"
+                            } else {
+                                "another propose in progress"
+                            }
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Query deployId channel data from the block that included this deploy
+        let data = self.get_data_at_deploy_id(&deploy_id, &block_hash).await?;
+
+        Ok((block_hash, deploy_id, data))
     }
 
     /// Checks if a block is finalized, with retry logic
@@ -788,17 +885,18 @@ impl<'a> F1r3flyApi<'a> {
         // Hash with Blake2b256
         let digest = blake2b_256_hash(&serialized);
 
-        // Sign the digest with secp256k1
-        let secp = Secp256k1::new();
-        let message = Secp256k1Message::from_digest(digest.into());
-        let signature = secp.sign_ecdsa(&message, &self.signing_key);
+        // Sign the digest with k256 (same library as the node uses for verification)
+        let signature: K256Signature = self
+            .signing_key
+            .sign_prehash(&digest)
+            .expect("Failed to sign deploy");
 
         // Get signature in DER format
-        let sig_bytes = signature.serialize_der().to_vec();
+        let sig_bytes = signature.to_der().as_bytes().to_vec();
 
-        // Get the public key in uncompressed format
-        let public_key = self.signing_key.public_key(&secp);
-        let pub_key_bytes = public_key.serialize_uncompressed().to_vec();
+        // Get the public key in uncompressed SEC1 format
+        let public_key = self.signing_key.verifying_key().to_encoded_point(false);
+        let pub_key_bytes = public_key.as_bytes().to_vec();
 
         // Return the complete deploy message
         DeployDataProto {
@@ -818,23 +916,71 @@ impl<'a> F1r3flyApi<'a> {
 
 /// Extracts a simplified string representation from a Par object
 fn extract_par_data(par: &Par) -> Option<String> {
+    use f1r3fly_models::rhoapi::expr::ExprInstance;
+
     // Check for expressions
     if !par.exprs.is_empty() && par.exprs[0].expr_instance.is_some() {
-        // Extract data from the first expression
         let expr = &par.exprs[0];
         if let Some(instance) = &expr.expr_instance {
             match instance {
-                // Handle different types of expressions
-                f1r3fly_models::rhoapi::expr::ExprInstance::GString(s) => {
-                    Some(format!("\"{}\"", s))
+                ExprInstance::GString(s) => Some(format!("\"{}\"", s)),
+                ExprInstance::GUri(u) => Some(format!("`{}`", u)),
+                ExprInstance::GInt(i) => Some(i.to_string()),
+                ExprInstance::GBool(b) => Some(b.to_string()),
+                ExprInstance::GByteArray(bytes) => Some(format!("0x{}", hex::encode(bytes))),
+                ExprInstance::EListBody(list) => {
+                    let items: Vec<String> = list
+                        .ps
+                        .iter()
+                        .map(|p| extract_par_data(p).unwrap_or_else(|| format!("{:?}", p)))
+                        .collect();
+                    Some(format!("[{}]", items.join(", ")))
                 }
-                f1r3fly_models::rhoapi::expr::ExprInstance::GInt(i) => Some(i.to_string()),
-                f1r3fly_models::rhoapi::expr::ExprInstance::GBool(b) => Some(b.to_string()),
-                // Add other types as needed
-                _ => Some("Complex expression".to_string()),
+                ExprInstance::ETupleBody(tuple) => {
+                    let items: Vec<String> = tuple
+                        .ps
+                        .iter()
+                        .map(|p| extract_par_data(p).unwrap_or_else(|| format!("{:?}", p)))
+                        .collect();
+                    Some(format!("({})", items.join(", ")))
+                }
+                ExprInstance::EMapBody(map) => {
+                    let items: Vec<String> = map
+                        .kvs
+                        .iter()
+                        .map(|kv| {
+                            let key = kv
+                                .key
+                                .as_ref()
+                                .and_then(extract_par_data)
+                                .unwrap_or_else(|| "?".to_string());
+                            let val = kv
+                                .value
+                                .as_ref()
+                                .and_then(extract_par_data)
+                                .unwrap_or_else(|| "?".to_string());
+                            format!("{}: {}", key, val)
+                        })
+                        .collect();
+                    Some(format!("{{{}}}", items.join(", ")))
+                }
+                _ => Some(format!("{:?}", instance)),
             }
         } else {
             None
+        }
+    }
+    // Check for unforgeable names
+    else if !par.unforgeables.is_empty() {
+        let unf = &par.unforgeables[0];
+        match &unf.unf_instance {
+            Some(UnfInstance::GDeployIdBody(id)) => {
+                Some(format!("DeployId({})", hex::encode(&id.sig)))
+            }
+            Some(UnfInstance::GPrivateBody(p)) => {
+                Some(format!("GPrivate({})", hex::encode(&p.id)))
+            }
+            _ => Some(format!("{:?}", unf)),
         }
     }
     // Check for sends
