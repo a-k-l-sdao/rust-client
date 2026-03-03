@@ -1,0 +1,38 @@
+// echo.rho — minimal echo contract
+new
+  echoCh,
+  stdout(`rho:io:stdout`),
+  deployId(`rho:rchain:deployId`),
+  insertArbitrary(`rho:registry:insertArbitrary`),
+  ret
+in {
+
+  // Method-dispatch contract
+  contract echoCh(@method, @input, ret) = {
+    match method {
+      "echo" => {
+        stdout!(["Echo received:", input]) |
+        ret!(input)
+      }
+      _ => {
+        ret!(["error", "unknown method", method])
+      }
+    }
+  }
+  |
+  // ── Registry ──────────────────────────────────────
+  new echoUriCh in {
+    insertArbitrary!(bundle+{*echoCh}, *echoUriCh) |
+    for (@echo <- echoUriCh) {
+      stdout!(["echo registered",{"echoUri":echo}]) |
+      deployId!(["echoUri",echo])
+    }
+  }
+
+  // Example usage:
+  // echoCh!("echo", "Hello, Rholang!", *ret)
+  // for (@response <- ret) { stdout!(["Response:", response]) }
+  //
+  // Via rho-call:
+  // rho-call call <uri> echo "Hello, Rholang!"
+}
