@@ -349,9 +349,9 @@ pub async fn bond_validator_command(
     // Step 3: Wait for block finalization using observer node
     println!("🔍 Waiting for block finalization...");
 
-    // Determine observer node settings (fallback to default observer or main node)
-    let observer_host = args.observer_host.as_deref().unwrap_or("localhost");
-    let observer_port = args.observer_port.unwrap_or(40452); // Default to port 40452 (common observer port)
+    // Determine observer node settings (fallback to the same node used for deploy)
+    let observer_host = args.observer_host.as_deref().unwrap_or(&args.host);
+    let observer_port = args.observer_port.unwrap_or(args.port);
 
     let finalization_start = Instant::now();
 
@@ -556,9 +556,9 @@ pub async fn transfer_command(args: &TransferArgs) -> Result<(), Box<dyn std::er
     // Step 3: Wait for block finalization using observer node
     println!("🔍 Waiting for block finalization...");
 
-    // Determine observer node settings (fallback to default observer or main node)
-    let observer_host = args.observer_host.as_deref().unwrap_or("localhost");
-    let observer_port = args.observer_port.unwrap_or(40452); // Default to port 40452 (common observer port)
+    // Determine observer node settings (fallback to the same node used for deploy)
+    let observer_host = args.observer_host.as_deref().unwrap_or(&args.host);
+    let observer_port = args.observer_port.unwrap_or(args.port);
 
     let finalization_start = Instant::now();
 
@@ -720,9 +720,9 @@ pub async fn deploy_and_wait_command(
     // Step 3: Wait for block finalization using observer node
     println!("🔍 Waiting for block finalization...");
 
-    // Determine observer node settings (fallback to default observer or main node)
-    let observer_host = args.observer_host.as_deref().unwrap_or("localhost");
-    let observer_port = args.observer_port.unwrap_or(40452); // Default to port 40452 (common observer port)
+    // Determine observer node settings (fallback to the same node used for deploy)
+    let observer_host = args.observer_host.as_deref().unwrap_or(&args.host);
+    let observer_port = args.observer_port.unwrap_or(args.port);
 
     let finalization_start = Instant::now();
 

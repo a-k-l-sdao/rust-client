@@ -142,11 +142,11 @@ pub struct DeployAndWaitArgs {
     #[arg(long = "check-interval", default_value_t = 5)]
     pub check_interval: u64,
 
-    /// Observer node host for finalization checks (falls back to main host if not specified)
+    /// Observer node host for finalization checks (falls back to --host if not specified)
     #[arg(long = "observer-host")]
     pub observer_host: Option<String>,
 
-    /// Observer node gRPC port for finalization checks (falls back to 40452 if not specified)
+    /// Observer node gRPC port for finalization checks (falls back to --port if not specified)
     #[arg(long = "observer-port")]
     pub observer_port: Option<u16>,
 }
@@ -479,11 +479,11 @@ pub struct BondValidatorArgs {
     #[arg(long = "check-interval", default_value_t = 5)]
     pub check_interval: u64,
 
-    /// Observer node host for finalization checks (falls back to main host if not specified)
+    /// Observer node host for finalization checks (falls back to --host if not specified)
     #[arg(long = "observer-host")]
     pub observer_host: Option<String>,
 
-    /// Observer node gRPC port for finalization checks (falls back to 40452 if not specified)
+    /// Observer node gRPC port for finalization checks (falls back to --port if not specified)
     #[arg(long = "observer-port")]
     pub observer_port: Option<u16>,
 }
@@ -566,11 +566,11 @@ pub struct TransferArgs {
     #[arg(long = "check-interval", default_value_t = 5)]
     pub check_interval: u64,
 
-    /// Observer node host for finalization checks (falls back to main host if not specified)
+    /// Observer node host for finalization checks (falls back to --host if not specified)
     #[arg(long = "observer-host")]
     pub observer_host: Option<String>,
 
-    /// Observer node gRPC port for finalization checks (falls back to 40452 if not specified)
+    /// Observer node gRPC port for finalization checks (falls back to --port if not specified)
     #[arg(long = "observer-port")]
     pub observer_port: Option<u16>,
 }

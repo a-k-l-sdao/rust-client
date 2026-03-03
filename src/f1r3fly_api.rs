@@ -91,9 +91,9 @@ impl<'a> F1r3flyApi<'a> {
         language: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let phlo_limit: i64 = if use_bigger_phlo_price {
-            50_000_000_000
+            5_000_000_000
         } else {
-            50_000
+            100_000
         };
 
         // Get current block number for VABN (solves Block 50 issue)
@@ -378,31 +378,56 @@ impl<'a> F1r3flyApi<'a> {
         // Deploy the code and get the deploy ID
         let deploy_id = self.deploy(rho_code, use_bigger_phlo_price, language).await?;
 
-        // Propose a block (retry on NotEnoughNewBlocks / another propose in progress)
+        // Try to propose, but if the node has auto-propose enabled the deploy will
+        // be picked up automatically. In that case, skip propose and poll the HTTP
+        // API to find which block contains our deploy.
+        let http_port = self.grpc_port + 1;
         let mut block_hash = String::new();
-        for attempt in 1..=6 {
-            match self.propose().await {
-                Ok(hash) => {
-                    block_hash = hash;
-                    break;
+
+        // First try a single propose
+        match self.propose().await {
+            Ok(hash) => {
+                block_hash = hash;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let is_auto_propose = msg.contains("NoNewDeploys")
+                    || msg.contains("NotEnoughNewBlocks")
+                    || msg.contains("another propose");
+
+                if is_auto_propose {
+                    println!("ℹ️  Propose not needed (node has auto-propose), waiting for deploy to land in a block...");
+                } else {
+                    return Err(e);
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if (msg.contains("NotEnoughNewBlocks") || msg.contains("another propose"))
-                        && attempt < 6
-                    {
-                        println!(
-                            "⏳ Propose attempt {}/6 failed ({}), retrying in 10s...",
-                            attempt,
-                            if msg.contains("NotEnoughNewBlocks") {
-                                "waiting for new blocks"
-                            } else {
-                                "another propose in progress"
-                            }
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    } else {
-                        return Err(e);
+            }
+        }
+
+        // If propose didn't give us a block hash, poll the HTTP API for it
+        if block_hash.is_empty() {
+            for poll in 1..=20 {
+                match self.get_deploy_block_hash(&deploy_id, http_port).await {
+                    Ok(Some(hash)) => {
+                        println!("✅ Deploy included in block {}", &hash[..16.min(hash.len())]);
+                        block_hash = hash;
+                        break;
+                    }
+                    Ok(None) if poll < 20 => {
+                        println!("⏳ Waiting for deploy to be included in a block... ({}/20)", poll);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                    Ok(None) => {
+                        return Err("Deploy not included in any block after 60s of polling".into());
+                    }
+                    Err(poll_err) => {
+                        if poll < 20 {
+                            // HTTP API might not be ready yet, retry
+                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        } else {
+                            return Err(format!(
+                                "Failed to look up deploy block: {}", poll_err
+                            ).into());
+                        }
                     }
                 }
             }
@@ -874,7 +899,7 @@ impl<'a> F1r3flyApi<'a> {
             phlo_limit,
             valid_after_block_number,
             shard_id: "root".into(),
-            language: language.clone(),
+            language:  String::new(), // language.clone(),
             sig: ByteString::new(),
             deployer: ByteString::new(),
             sig_algorithm: String::new(),
