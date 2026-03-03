@@ -112,9 +112,9 @@ impl<'a> F1r3flyApi<'a> {
         expiration_timestamp: i64,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let phlo_limit: i64 = if use_bigger_phlo_price {
-            50_000_000_000
+            5_000_000_000
         } else {
-            50_000
+            100_000
         };
 
         // Get current block number for VABN (solves Block 50 issue).
@@ -442,27 +442,51 @@ impl<'a> F1r3flyApi<'a> {
         // Deploy the code and get the deploy ID
         let deploy_id = self.deploy(rho_code, use_bigger_phlo_price, language, expiration_timestamp).await?;
 
-        // Propose a block (retry on recoverable errors)
+        // Try to propose, but if the node has auto-propose enabled the deploy will
+        // be picked up automatically. In that case, skip propose and poll the HTTP
+        // API to find which block contains our deploy.
+        let http_port = self.grpc_port + 1;
         let mut block_hash = String::new();
-        for attempt in 1..=6 {
-            match self.propose().await {
-                Ok(ProposeResult::Proposed(hash)) => {
-                    block_hash = hash;
-                    break;
-                }
-                Ok(ProposeResult::Skipped(reason)) => {
-                    if attempt < 6 {
-                        println!(
-                            "⏳ Propose attempt {}/6 skipped ({}), retrying in 10s...",
-                            attempt, reason
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    } else {
-                        return Err(format!("Propose skipped after 6 attempts: {}", reason).into());
+
+        // First try a single propose
+        match self.propose().await {
+            Ok(ProposeResult::Proposed(hash)) => {
+                block_hash = hash;
+            }
+            Ok(ProposeResult::Skipped(reason)) => {
+                println!("ℹ️  Propose skipped ({}), waiting for deploy to land in a block...", reason);
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+
+        // If propose didn't give us a block hash, poll the HTTP API for it
+        if block_hash.is_empty() {
+            for poll in 1..=20 {
+                match self.get_deploy_block_hash(&deploy_id, http_port).await {
+                    Ok(Some(hash)) => {
+                        println!("✅ Deploy included in block {}", &hash[..16.min(hash.len())]);
+                        block_hash = hash;
+                        break;
                     }
-                }
-                Err(e) => {
-                    return Err(e);
+                    Ok(None) if poll < 20 => {
+                        println!("⏳ Waiting for deploy to be included in a block... ({}/20)", poll);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                    Ok(None) => {
+                        return Err("Deploy not included in any block after 60s of polling".into());
+                    }
+                    Err(poll_err) => {
+                        if poll < 20 {
+                            // HTTP API might not be ready yet, retry
+                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        } else {
+                            return Err(format!(
+                                "Failed to look up deploy block: {}", poll_err
+                            ).into());
+                        }
+                    }
                 }
             }
         }
@@ -1102,7 +1126,7 @@ impl<'a> F1r3flyApi<'a> {
             phlo_limit,
             valid_after_block_number,
             shard_id: "root".into(),
-            language: language.clone(),
+            language:  String::new(), // language.clone(),
             sig: ByteString::new(),
             deployer: ByteString::new(),
             sig_algorithm: String::new(),
