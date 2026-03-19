@@ -1,3 +1,4 @@
-new stdout(`rho:io:stdout`) in {
-  stdout!("hello, world!")
+new stdout(`rho:io:stdout`), deployId(`rho:rchain:deployId`) in {
+  stdout!("hello, world!") |
+  deployId!("hello, world!")
 }
