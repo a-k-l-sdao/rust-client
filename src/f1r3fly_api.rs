@@ -447,6 +447,7 @@ impl<'a> F1r3flyApi<'a> {
         // API to find which block contains our deploy.
         let http_port = self.grpc_port + 1;
         let mut block_hash = String::new();
+        let mut auto_propose_mode = false;
 
         // First try a single propose
         match self.propose().await {
@@ -455,9 +456,20 @@ impl<'a> F1r3flyApi<'a> {
             }
             Ok(ProposeResult::Skipped(reason)) => {
                 println!("ℹ️  Propose skipped ({}), waiting for deploy to land in a block...", reason);
+                auto_propose_mode = true;
             }
             Err(e) => {
-                return Err(e);
+                let msg = e.to_string();
+                let is_auto_propose = msg.contains("NoNewDeploys")
+                    || msg.contains("NotEnoughNewBlocks")
+                    || msg.contains("another propose");
+
+                if is_auto_propose {
+                    println!("ℹ️  Propose not needed (node has auto-propose), waiting for deploy to land in a block...");
+                    auto_propose_mode = true;
+                } else {
+                    return Err(e);
+                }
             }
         }
 
@@ -491,10 +503,93 @@ impl<'a> F1r3flyApi<'a> {
             }
         }
 
-        // Query deployId channel data from the block that included this deploy
-        let data = self.get_data_at_deploy_id(&deploy_id, &block_hash).await?;
+        // On auto-propose shards, reductions can span multiple blocks (the bridge
+        // contract's response may land in a block after the one that included the deploy).
+        // Use the HTTP /api/data-at-name endpoint which searches across recent blocks.
+        let data = if auto_propose_mode {
+            self.poll_data_at_deploy_id_http(&deploy_id, http_port, 60, 2).await?
+        } else {
+            self.get_data_at_deploy_id(&deploy_id, &block_hash).await?
+        };
 
         Ok((block_hash, deploy_id, data))
+    }
+
+    /// Poll the HTTP `/api/data-at-name` endpoint for data on a deploy's `deployId` channel.
+    /// On auto-propose shards, reductions can span multiple blocks, so this polls until the
+    /// data appears rather than querying a single specific block.
+    pub async fn poll_data_at_deploy_id_http(
+        &self,
+        deploy_id_hex: &str,
+        http_port: u16,
+        max_attempts: u32,
+        poll_interval_secs: u64,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let url = format!("http://{}:{}/api/data-at-name", self.node_host, http_port);
+
+        let body = serde_json::json!({
+            "depth": 50,
+            "name": {
+                "UnforgDeploy": {
+                    "data": deploy_id_hex
+                }
+            }
+        });
+
+        for attempt in 1..=max_attempts {
+            tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval_secs)).await;
+
+            let resp = match client.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("  HTTP poll attempt {}/{}: {}", attempt, max_attempts, e);
+                    continue;
+                }
+            };
+
+            let data: serde_json::Value = match resp.json().await {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("  HTTP poll attempt {}/{}: parse error: {}", attempt, max_attempts, e);
+                    continue;
+                }
+            };
+
+            let length = data.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
+            if length == 0 {
+                println!("⏳ Waiting for deployId data... ({}/{})", attempt, max_attempts);
+                continue;
+            }
+
+            let mut results = Vec::new();
+            if let Some(exprs) = data.get("exprs").and_then(|v| v.as_array()) {
+                for expr in exprs {
+                    if let Some(expr_obj) = expr.get("expr") {
+                        for (_key, val) in expr_obj.as_object().into_iter().flat_map(|m| m.iter()) {
+                            if let Some(d) = val.get("data") {
+                                match d {
+                                    serde_json::Value::Number(n) => results.push(n.to_string()),
+                                    serde_json::Value::String(s) => results.push(s.clone()),
+                                    serde_json::Value::Bool(b) => results.push(b.to_string()),
+                                    other => results.push(other.to_string()),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !results.is_empty() {
+                return Ok(results);
+            }
+            return Ok(vec![data.to_string()]);
+        }
+
+        Err(format!(
+            "Timed out after {} attempts waiting for data at deploy {}",
+            max_attempts, deploy_id_hex
+        ).into())
     }
 
     /// Checks if a block is finalized, with retry logic
