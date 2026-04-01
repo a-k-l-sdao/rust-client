@@ -4,22 +4,21 @@ All notable changes to the F1r3fly rust-client will be documented in this file.
 This changelog is automatically generated from conventional commits.
 
 
-## [0.1.1] - 2026-03-30
+## [0.2.0] - 2026-04-01
+
+### Bug Fixes
+
+- observer fallback uses --host/--port instead of hardcoded defaults, handle auto-propose nodes
+- include language field in deploy signature projection
+- update epoch-rewards smoke test to verify parsed output
+- use HTTP API for epoch-rewards to parse full response data
+- use correct URI rho:vault:system in test_systemvault.rho
 
 ### CI
 
 - install protobuf-compiler for models build.rs
 - add arch-specific RUSTFLAGS for gxhash (aes+neon on arm64)
 - add build, test, and release workflows
-
-
-## [0.1.0] - 2026-03-17
-
-### Bug Fixes
-
-- update epoch-rewards smoke test to verify parsed output
-- use HTTP API for epoch-rewards to parse full response data
-- use correct URI rho:vault:system in test_systemvault.rho
 
 ### Documentation
 
