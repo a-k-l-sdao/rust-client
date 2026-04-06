@@ -165,6 +165,37 @@ pub async fn propose_command(args: &ProposeArgs) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn print_deploy_id_data(data: &[String]) {
+    if !data.is_empty() {
+        println!("📦 deployId channel data:");
+        for (i, item) in data.iter().enumerate() {
+            println!("  [{}] {}", i, item);
+        }
+    } else {
+        println!("📦 deployId channel: (no data)");
+    }
+}
+
+async fn fetch_deploy_id_data(
+    api: &F1r3flyApi<'_>,
+    deploy_id: &str,
+    block_hash: &str,
+    http_port: u16,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // Try gRPC first (queries the specific block directly)
+    match api.get_data_at_deploy_id(deploy_id, block_hash).await {
+        Ok(data) if !data.is_empty() => return Ok(data),
+        Ok(_) => {
+            println!("ℹ️  No data in deploy block, polling HTTP API...");
+        }
+        Err(e) => {
+            println!("ℹ️  gRPC data lookup failed ({}), polling HTTP API...", e);
+        }
+    }
+    // Fall back to HTTP polling (needed when reductions span multiple blocks)
+    api.poll_data_at_deploy_id_http(deploy_id, http_port, 60, 2).await
+}
+
 pub async fn full_deploy_command(args: &DeployArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Read the Rholang code from file
     println!("Reading Rholang from: {}", args.file.display());
@@ -227,14 +258,7 @@ pub async fn full_deploy_command(args: &DeployArgs) -> Result<(), Box<dyn std::e
             }
 
             println!("✅ Deployment and block proposal successful!");
-            if !data.is_empty() {
-                println!("📦 deployId channel data:");
-                for (i, item) in data.iter().enumerate() {
-                    println!("  [{}] {}", i, item);
-                }
-            } else {
-                println!("📦 deployId channel: (no data)");
-            }
+            print_deploy_id_data(&data);
         }
         Err(e) => {
             println!("Operation failed!");
@@ -787,6 +811,13 @@ pub async fn deploy_and_wait_command(
     let block_wait_duration = block_wait_start.elapsed();
     println!("Block inclusion time: {:.2?}", block_wait_duration);
 
+    // Fetch and print deployId channel data
+    println!("Fetching deployId channel data...");
+    match fetch_deploy_id_data(&f1r3fly_api, &deploy_id, &block_hash, args.http_port).await {
+        Ok(data) => print_deploy_id_data(&data),
+        Err(e) => println!("⚠️  Could not fetch deployId channel data: {}", e),
+    }
+
     // Step 3: Wait for block finalization using observer node
     println!("Waiting for block finalization...");
 
@@ -805,6 +836,122 @@ pub async fn deploy_and_wait_command(
 
     // Calculate finalization attempts (default: 120 attempts, 5 second intervals = 10 minutes)
     let finalization_max_attempts: u32 = 120; // 10 minutes (120 * 5 seconds)
+    let finalization_retry_delay: u64 = 5;
+
+    match observer_api
+        .is_finalized(
+            &block_hash,
+            finalization_max_attempts,
+            finalization_retry_delay,
+        )
+        .await
+    {
+        Ok(true) => {
+            let finalization_duration = finalization_start.elapsed();
+            let total_duration = deploy_start_time.elapsed();
+
+            println!("Block finalized! Deploy completed successfully.");
+            println!("Finalization time: {:.2?}", finalization_duration);
+            println!("Total time: {:.2?}", total_duration);
+        }
+        Ok(false) => {
+            println!(
+                "Block not yet finalized after {} attempts, but deploy is in the blockchain.",
+                finalization_max_attempts
+            );
+            println!("The deployment is likely successful and will be finalized soon.");
+        }
+        Err(e) => {
+            println!("Error checking finalization status: {}", e);
+            println!("Could not verify finalization, but deploy is in the blockchain.");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn full_deploy_and_wait_command(
+    args: &DeployAndWaitArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Reading Rholang from: {}", args.file);
+    let rholang_code =
+        fs::read_to_string(&args.file).map_err(|e| format!("Failed to read file: {}", e))?;
+    println!("Code size: {} bytes", rholang_code.len());
+
+    let private_key = args
+        .private_key
+        .as_deref()
+        .unwrap_or("5f668a7ee96d944a4494cc947e4005e172d7ab3461ee5538f1f2a45a835e9657");
+
+    println!("Connecting to F1r3fly node at {}:{}", args.host, args.port);
+    let f1r3fly_api = F1r3flyApi::new(private_key, &args.host, args.port);
+
+    let phlo_limit = if args.bigger_phlo {
+        "5,000,000,000"
+    } else {
+        "50,000"
+    };
+    println!("Using phlo limit: {}", phlo_limit);
+
+    let expiration_timestamp = calculate_expiration_timestamp(args.expiration, args.expires_in);
+    if expiration_timestamp > 0 {
+        println!("Deploy expiration: {} ms", expiration_timestamp);
+    }
+
+    // Step 1: Deploy + propose (reuses full_deploy which handles auto-propose fallback)
+    println!("Deploying Rholang code and proposing a block...");
+    let deploy_start_time = Instant::now();
+
+    let block_hash = match f1r3fly_api
+        .full_deploy(
+            &rholang_code,
+            args.bigger_phlo,
+            "rholang",
+            expiration_timestamp,
+        )
+        .await
+    {
+        Ok((block_hash, deploy_id, data)) => {
+            let duration = deploy_start_time.elapsed();
+            println!("Deploy ID: {}", deploy_id);
+            println!("Block hash: {}", block_hash);
+            println!("Deploy + propose time: {:.2?}", duration);
+
+            match f1r3fly_api.get_deploy_info(&deploy_id, args.http_port).await {
+                Ok(info) => {
+                    if info.errored {
+                        println!("Deploy execution FAILED (used all phlo = out of resources)");
+                        if let Some(err) = &info.system_deploy_error {
+                            println!("   System error: {}", err);
+                        }
+                        return Err("Deploy errored during execution".into());
+                    }
+                }
+                Err(e) => {
+                    println!("Could not verify deploy status via HTTP API: {}", e);
+                }
+            }
+
+            print_deploy_id_data(&data);
+            block_hash
+        }
+        Err(e) => {
+            println!("Deployment failed!");
+            println!("Error: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Step 2: Wait for block finalization
+    println!("Waiting for block finalization...");
+
+    let observer_host = args.observer_host.as_deref().unwrap_or(&args.host);
+    let observer_port = args.observer_port.unwrap_or(args.port);
+    let finalization_start = Instant::now();
+
+    let observer_api = F1r3flyApi::new(private_key, observer_host, observer_port);
+
+    let finalization_max_attempts: u32 = 120;
     let finalization_retry_delay: u64 = 5;
 
     match observer_api

@@ -23,6 +23,9 @@ pub enum Commands {
     /// Deploy Rholang code and wait for finalization
     DeployAndWait(DeployAndWaitArgs),
 
+    /// Deploy Rholang code, propose a block, and wait for finalization
+    FullDeployAndWait(DeployAndWaitArgs),
+
     /// Check if a block is finalized
     IsFinalized(IsFinalizedArgs),
 

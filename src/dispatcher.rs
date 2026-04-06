@@ -18,6 +18,9 @@ impl Dispatcher {
             Commands::DeployAndWait(args) => deploy_and_wait_command(args)
                 .await
                 .map_err(NodeCliError::from),
+            Commands::FullDeployAndWait(args) => full_deploy_and_wait_command(args)
+                .await
+                .map_err(NodeCliError::from),
             Commands::IsFinalized(args) => {
                 is_finalized_command(args).await.map_err(NodeCliError::from)
             }
@@ -131,6 +134,7 @@ impl Dispatcher {
             Commands::Propose(_) => "propose",
             Commands::FullDeploy(_) => "full-deploy",
             Commands::DeployAndWait(_) => "deploy-and-wait",
+            Commands::FullDeployAndWait(_) => "full-deploy-and-wait",
             Commands::IsFinalized(_) => "is-finalized",
             Commands::ExploratoryDeploy(_) => "exploratory-deploy",
             Commands::GeneratePublicKey(_) => "generate-public-key",
