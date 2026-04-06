@@ -4,7 +4,7 @@ All notable changes to the F1r3fly rust-client will be documented in this file.
 This changelog is automatically generated from conventional commits.
 
 
-## [0.2.0] - 2026-04-01
+## [0.2.0] - 2026-04-06
 
 ### Bug Fixes
 
